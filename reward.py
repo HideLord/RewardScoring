@@ -41,9 +41,9 @@ def get_reward_scores(
 ):
     def get_batch_size(token_length):
         if token_length <= 128:
-            return 128
+            return 32
         if token_length <= 256:
-            return 64
+            return 32
         if token_length <= 512:
             return 32
         elif token_length <= 1024:
@@ -55,14 +55,14 @@ def get_reward_scores(
         else:
             return 4
     
-    #model_name = 'Skywork/Skywork-Reward-Gemma-2-27B-v0.2'
-    model_name = '/home/hidelord/text-generation-webui-snapshot-2024-04-14/models/Skywork-Reward-Gemma-2-27B-v0.2'
+    model_name = 'Skywork/Skywork-Reward-Gemma-2-27B-v0.2'
+    #model_name = '/home/hidelord/text-generation-webui-snapshot-2024-04-14/models/Skywork-Reward-Gemma-2-27B-v0.2'
 
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
         device_map="auto",
-        attn_implementation="eager",
+        attn_implementation="flash_attention_2",
         num_labels=1,
     )
 
@@ -94,6 +94,15 @@ def get_reward_scores(
     with torch.no_grad():
         while current_idx < len(sorted_conversations):
             current_length = sorted_lengths[current_idx]
+
+            # Check if the conversation length exceeds 4096 tokens
+            if current_length >= 4096:
+                original_idx = original_indices[current_idx]
+                all_scores[original_idx] = None
+                current_idx += 1
+                pbar.update(1)
+                continue
+            
             batch_size = get_batch_size(current_length)
             success = False
             
@@ -186,20 +195,22 @@ def get_phi_convos(data):
     return convos
 
 def main():
-    data = download_data()[:100]
-    reward_scores = get_reward_scores(get_deepseek_convos(data))
+    BATCH_SIZE = 16384
+    data = download_data()
+    unprocessed_data = [element for element in data if REWARD not in element[DEEPSEEK_RESPONSE]]
 
-    for element, reward in zip(data, reward_scores):
-        element['deepseek_response'][REWARD] = reward
+    for i in range(0, len(unprocessed_data), BATCH_SIZE):
+        batch = data[i:i + BATCH_SIZE]
 
-    reward_scores = get_reward_scores(get_phi_convos(data))
+        reward_scores = get_reward_scores(get_deepseek_convos(batch))
+        for element, reward in zip(batch, reward_scores):
+            element[DEEPSEEK_RESPONSE][REWARD] = reward
 
-    for element, reward in zip(data, reward_scores):
-        element['phi-3-mini_response'][REWARD] = reward
+        reward_scores = get_reward_scores(get_phi_convos(batch))
+        for element, reward in zip(batch, reward_scores):
+            element[PHI_RESPONSE][REWARD] = reward
 
-    with open('test.json', 'w') as file:
-        json.dump(data, file)
-
+        upload_data(data)
 
 if __name__ == "__main__":
     main()
